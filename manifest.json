@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "Marketplace Limpo",
+  "version": "0.1.0",
+  "description": "Limpa a busca do Facebook Marketplace: blacklist de palavras, match exato do termo, faixa de preço real, sem patrocinados e sem anúncio duplicado.",
+  "permissions": ["storage", "activeTab"],
+  "content_scripts": [
+    {
+      "matches": ["https://www.facebook.com/*", "https://web.facebook.com/*"],
+      "js": ["content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Marketplace Limpo"
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "marketplace-limpo@dglr",
+      "strict_min_version": "115.0"
+    }
+  }
+}
