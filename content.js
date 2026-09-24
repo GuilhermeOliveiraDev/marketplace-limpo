@@ -50,35 +50,72 @@
     return parseFloat(m[1].replace(/\./g, '').replace(',', '.'));
   };
 
-  const getQueryWords = () => {
+  // O textContent do card cola os pedaços sem espaço ("R$1.900Z fold 6Rio de Janeiro, RJ"):
+  // preço, título e cidade são nós de texto separados. Juntar com espaço devolve as
+  // fronteiras — sem isso "fold 6" não casa (o "6" fica grudado no "R" da cidade) e
+  // um título que começa com número entra no preço ("R$1.8002 sofás" → 18002).
+  const textOf = (el) => {
+    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    const parts = [];
+    let n;
+    while ((n = walker.nextNode())) parts.push(n.textContent);
+    return parts.join(' ');
+  };
+
+  // Blacklist e match exato comparam TOKENS: sequências de letras ou de dígitos, já
+  // normalizadas. Letra e dígito grudados viram tokens separados, então "fold7" (como o
+  // FB escreve) e "fold 7" (como a gente digita) são a mesma coisa; "512gb" vira "512 gb".
+  const tokenize = (s) => normalize(s).match(/[a-z]+|[0-9]+/g) || [];
+
+  // O preço sai do texto antes da comparação: "R$ 7.000" não pode fazer um "Fold 6"
+  // passar numa busca por "fold 7". A faixa de preço tem filtro próprio.
+  const PRICE_RX = /r\$\s*[\d.]+(?:,\d{1,2})?/g;
+  const matchTokens = (text) => tokenize(text.replace(PRICE_RX, ' '));
+
+  // --- Match exato ---------------------------------------------------------
+  // Regra: letra é frouxa, número é exato e grudado. "fold" casa dentro de "zfold" e
+  // de "folder"; "7" só casa o número 7 inteiro (não "70", não "512") e só encostado
+  // na palavra que veio junto na busca. Assim "fold 7" acha "z fold 7", "zfold 7",
+  // "zfold7", "z fold7", "fold7" e "fold 7" — e não acha "fold 6" nem "fold 6 ... 7 meses".
+  //
+  // Cada PEDAÇO da busca vira uma regex sobre os tokens do card unidos por espaço.
+  // Um número digitado sozinho ("fold 7") gruda no vizinho e forma um pedaço só com
+  // ele ("fold 7"); "512gb" e "fold7" já são um pedaço só.
+  const chunkRx = (chunk) => {
+    const parts = tokenize(chunk).map((t) =>
+      /^[0-9]/.test(t) ? `(?<![0-9])${t}(?![0-9])` : `${t}[a-z]*`
+    );
+    return new RegExp(parts.join(' ?'));
+  };
+
+  const getQueryChunks = () => {
     const q = new URLSearchParams(location.search).get('query');
     if (!q) return [];
-    return normalize(q)
+    const words = normalize(q)
       .split(/\s+/)
-      .filter((w) => w.length > 1 && !STOPWORDS.has(w));
+      .filter((w) => w && !STOPWORDS.has(w));
+    const chunks = [];
+    for (const w of words) {
+      const prev = chunks[chunks.length - 1];
+      if (/^[0-9]+$/.test(w) && prev && !/^[0-9]+$/.test(prev)) chunks[chunks.length - 1] += ' ' + w;
+      else if (prev && /^[0-9]+$/.test(prev) && !/^[0-9]/.test(w)) chunks[chunks.length - 1] += ' ' + w;
+      else chunks.push(w);
+    }
+    return chunks.map(chunkRx);
   };
 
-  const escapeRx = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-
-  // A blacklist casa palavra inteira, não pedaço de palavra: "ar" tem que derrubar
-  // "camara de ar" e deixar passar "escape dizars" e "camara".
-  //
-  // A fronteira só considera LETRA quando o termo começa/termina em letra. Motivo: o
-  // textContent do card cola os pedaços sem espaço ("R$ 100sofa retratil"), então um
-  // dígito grudado antes da palavra não pode invalidar o match. Já um termo que começa
-  // em dígito ("12v") usa dígito na fronteira também, pra não casar dentro de "112v".
+  // --- Blacklist -------------------------------------------------------------
+  // Casa a sequência inteira, palavra inteira: "ar" derruba "camara de ar" e deixa
+  // passar "escape dizars" e "camara"; "12v" não casa dentro de "112v". O espaço
+  // entre os tokens do termo é opcional, então "z fold 6" pega "zfold 6", "zfold6"
+  // e "z fold6". (O contrário não: "zfold 4" digitado grudado só pega grudado.)
   const toBlacklistRx = (term) => {
-    const left = /^[0-9]/.test(term) ? '(?<![a-z0-9])' : '(?<![a-z])';
-    const right = /[0-9]$/.test(term) ? '(?![a-z0-9])' : '(?![a-z])';
-    return new RegExp(left + escapeRx(term) + right);
+    const toks = tokenize(term);
+    if (toks.length === 0) return null;
+    return new RegExp('(?<![a-z0-9])' + toks.join(' ?') + '(?![a-z0-9])');
   };
 
-  const getBlacklist = () =>
-    settings.blacklist
-      .split('\n')
-      .map((w) => normalize(w.trim()))
-      .filter(Boolean)
-      .map(toBlacklistRx);
+  const getBlacklist = () => settings.blacklist.split('\n').map(toBlacklistRx).filter(Boolean);
 
   // Sobe do <a> do card até a "célula" da grade (o ancestral mais alto que ainda contém
   // só esse anúncio). Esconder a célula — e não o <a> lá dentro — faz a grade reocupar
@@ -242,7 +279,7 @@
     const root = document.querySelector('[role="main"]') || document.body;
     // Os critérios são avaliados sempre, independente dos toggles: o card recebe um
     // motivo fixo e só depois se decide se esse motivo esconde ou não.
-    const words = getQueryWords();
+    const chunks = getQueryChunks();
     const blacklist = getBlacklist();
     // Preço: a faixa vem sempre do filtro do próprio Facebook (params minPrice/maxPrice
     // da URL), que o FB nem sempre respeita nos resultados — aqui ela é reforçada.
@@ -263,8 +300,9 @@
 
     itemLinks.forEach((card, i) => {
       const cell = itemCells[i];
-      const rawText = card.textContent || '';
-      const text = normalize(rawText);
+      const rawText = textOf(card);
+      const text = normalize(rawText); // chave do dedupe: tudo, preço incluso
+      const tokenText = matchTokens(text).join(' ');
       // Cada card fica com o PRIMEIRO motivo que se aplica, nesta ordem — e essa
       // classificação não muda com os toggles. Patrocinado continua classificado como
       // patrocinado mesmo com o filtro desligado; nesse caso ele reaparece, em vez de
@@ -274,8 +312,8 @@
       // O rótulo "Patrocinado" costuma ficar FORA do <a>, em outro elemento da célula —
       // por isso a checagem é na célula inteira, não no link.
       if (isSponsored(cell)) motivo = 'patrocinados';
-      if (!motivo && blacklist.some((rx) => rx.test(text))) motivo = 'palavra proibida';
-      if (!motivo && words.length > 0 && !words.every((w) => text.includes(w))) motivo = 'fora da busca';
+      if (!motivo && blacklist.some((rx) => rx.test(tokenText))) motivo = 'palavra proibida';
+      if (!motivo && chunks.length > 0 && !chunks.every((rx) => rx.test(tokenText))) motivo = 'fora da busca';
       if (!motivo && (min !== null || max !== null)) {
         const price = parsePrice(rawText);
         if (price !== null && ((min !== null && price < min) || (max !== null && price > max)))
